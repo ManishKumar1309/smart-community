@@ -4509,3 +4509,269 @@ html {
     justify-content: center;
   }
 }
+
+/* ========================================================
+   COMMUNITIES & CHANNELS BACKEND INTEGRATION STYLES
+   ======================================================== */
+
+.channel-item-row {
+  display: flex;
+  align-items: center;
+  position: relative;
+  border-radius: 6px;
+  width: 100%;
+  transition: all 0.15s ease;
+}
+
+.channel-item-row:hover {
+  background-color: var(--color-light-lavender);
+}
+
+.channel-item-row.active {
+  background-color: var(--color-light-lavender);
+  font-weight: 700;
+  border-left: 3px solid var(--color-soft-lavender);
+}
+
+.channel-item-row .channel-item {
+  flex: 1;
+  border-radius: 6px 0 0 6px;
+}
+
+.channel-item-row.active .channel-item {
+  border-left: none;
+}
+
+.channel-item-actions {
+  display: none;
+  align-items: center;
+  gap: 3px;
+  padding-right: 6px;
+}
+
+.channel-item-row:hover .channel-item-actions {
+  display: flex;
+}
+
+.btn-chan-action {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 3px 5px;
+  font-size: 0.75rem;
+  border-radius: 4px;
+  color: var(--color-muted-grey);
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-chan-action:hover {
+  background-color: rgba(16, 16, 16, 0.08);
+  color: var(--color-ink-black);
+}
+
+.btn-chan-action.delete:hover {
+  background-color: #FEE2E2;
+  color: #DC2626;
+}
+
+/* Loading & Empty States for Channels */
+.channels-loading-state,
+.channels-error-state,
+.channels-empty-state {
+  padding: 1.25rem 0.75rem;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--color-muted-grey);
+}
+
+.channels-loading-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.mini-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--color-soft-border);
+  border-top-color: var(--color-soft-lavender);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.channels-error-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  color: #DC2626;
+}
+
+.btn-retry-channels {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.75rem;
+  background-color: var(--color-warm-cream);
+  border: 1px solid var(--color-soft-border);
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--color-ink-black);
+}
+
+.btn-retry-channels:hover {
+  background-color: var(--color-light-lavender);
+}
+
+.channels-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.btn-create-first-chan {
+  padding: 0.35rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background-color: var(--color-light-lavender);
+  color: var(--color-ink-black);
+  border: 1px solid var(--color-soft-lavender);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn-create-first-chan:hover {
+  background-color: var(--color-soft-lavender);
+  color: #FFFFFF;
+}
+
+/* Communities Loading, Error & Empty States */
+.communities-loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3.5rem 1rem;
+  gap: 1rem;
+  color: var(--color-muted-grey);
+  font-size: 0.95rem;
+}
+
+.spinner-large {
+  width: 36px;
+  height: 36px;
+  border: 3px solid var(--color-soft-border);
+  border-top-color: var(--color-soft-lavender);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.communities-error-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem 1rem;
+  gap: 1rem;
+  background: #FFF5F5;
+  border: 1px solid #FED7D7;
+  border-radius: 12px;
+  color: #9B2C2C;
+  text-align: center;
+}
+
+.communities-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3.5rem 1.5rem;
+  background: var(--bg-card);
+  border: 1px dashed var(--color-soft-border);
+  border-radius: 12px;
+  text-align: center;
+  gap: 0.75rem;
+}
+
+.communities-empty-state .empty-icon {
+  font-size: 2.75rem;
+  line-height: 1;
+}
+
+.communities-empty-state h3 {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--color-ink-black);
+}
+
+.communities-empty-state p {
+  font-size: 0.875rem;
+  color: var(--color-muted-grey);
+  max-width: 420px;
+}
+
+.communities-empty-state .empty-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.btn-retry-action {
+  padding: 0.5rem 1.25rem;
+  background: var(--color-soft-lavender);
+  color: #FFFFFF;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.btn-retry-action:hover {
+  opacity: 0.9;
+}
+
+/* Modal Error Banner */
+.modal-error-banner {
+  background-color: #FFF5F5;
+  border: 1px solid #FEB2B2;
+  color: #C53030;
+  padding: 0.65rem 0.85rem;
+  border-radius: 6px;
+  font-size: 0.825rem;
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.btn-modal-delete {
+  padding: 0.55rem 1.25rem;
+  background-color: #E53E3E;
+  color: #FFFFFF;
+  border: none;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.btn-modal-delete:hover:not(:disabled) {
+  background-color: #C53030;
+}
+
+.btn-modal-delete:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}

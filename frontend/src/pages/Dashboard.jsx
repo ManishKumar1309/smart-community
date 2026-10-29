@@ -1,7 +1,9 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import './Dashboard.css';
 import topLogo from '../assets/yappy-logo.png';
 import authService from '../services/authService';
+import communityService from '../services/communityService';
+import channelService from '../services/channelService';
 import {
   initialCurrentUser,
   initialCommunities,
@@ -66,6 +68,81 @@ const AVATAR_PRESETS = [
   { emoji: '☕', label: 'Lounge', bg: '#FFEDD5', border: '#FDBA74' },
 ];
 
+// Helper: Map backend community response to dashboard structure
+const mapBackendCommunity = (comm, currentUserId) => {
+  const isOwner = Boolean(currentUserId && String(comm.owner) === String(currentUserId));
+  const isMember = Boolean(comm.isMember || isOwner);
+
+  const category = comm.category || 'General';
+  let icon = '👥';
+  let iconBg = '#F0E7FF';
+  let iconColor = '#8A2BE2';
+
+  if (category === 'Development') {
+    icon = '</>';
+    iconBg = '#F0E7FF';
+    iconColor = '#8A2BE2';
+  } else if (category === 'Design') {
+    icon = '🎨';
+    iconBg = '#FAF8F3';
+    iconColor = '#FF8FA3';
+  } else if (category === 'AI/ML') {
+    icon = '🧠';
+    iconBg = '#FAF8F3';
+    iconColor = '#FF8FA3';
+  } else if (category === 'Gaming') {
+    icon = '🎮';
+    iconBg = '#EDE9FE';
+    iconColor = '#8B5CF6';
+  } else if (category === 'Education') {
+    icon = '📚';
+    iconBg = '#FEF3C7';
+    iconColor = '#D97706';
+  } else if (category === 'Tech') {
+    icon = '💻';
+    iconBg = '#E0E7FF';
+    iconColor = '#4F46E5';
+  }
+
+  return {
+    id: comm._id,
+    _id: comm._id,
+    name: comm.name,
+    slug: comm.name.toLowerCase().replace(/\s+/g, '-'),
+    icon: comm.icon || icon,
+    iconBg: comm.iconBg || iconBg,
+    iconColor: comm.iconColor || iconColor,
+    category,
+    description: comm.description || '',
+    membersCount: comm.memberCount || 1,
+    userRole: isOwner ? 'Owner' : (isMember ? 'Member' : 'Viewer'),
+    isJoined: isMember,
+    owner: comm.owner,
+    channels: comm.channels || [],
+    members: comm.members || [
+      ...(isOwner ? [{ id: currentUserId, role: 'Owner', name: 'Owner', status: 'Online' }] : [])
+    ],
+    createdAt: comm.createdAt,
+  };
+};
+
+// Helper: Map backend channel response to dashboard structure
+const mapBackendChannel = (ch) => {
+  return {
+    id: ch._id,
+    _id: ch._id,
+    name: ch.name,
+    topic: ch.description || 'Welcome to the channel!',
+    description: ch.description || '',
+    type: ch.type || 'text',
+    isAnnouncement: ch.type === 'announcement',
+    isPrivate: false,
+    community: ch.community,
+    createdBy: ch.createdBy,
+    createdAt: ch.createdAt,
+  };
+};
+
 const Dashboard = ({ onFormSwitch }) => {
   // Navigation & View State
   const [activeTab, setActiveTab] = useState(() => {
@@ -115,19 +192,24 @@ const Dashboard = ({ onFormSwitch }) => {
   // App Data State (Synced with local auth if user previously logged in)
   const [currentUser, setCurrentUser] = useState(() => {
     const saved = authService.getUser();
+    const tokenUid = authService.getCurrentUserId();
     if (saved && (saved.name || saved.email)) {
       const email = saved.email || initialCurrentUser.email;
       const name = saved.name || email.split('@')[0];
       const initials = name.slice(0, 2).toUpperCase();
       return {
         ...initialCurrentUser,
+        id: tokenUid || saved.id || 'usr_101',
         name,
         email,
         username: email.split('@')[0],
         avatarText: initials,
       };
     }
-    return initialCurrentUser;
+    return {
+      ...initialCurrentUser,
+      id: tokenUid || initialCurrentUser.id,
+    };
   });
   const [communities, setCommunities] = useState(initialCommunities);
   const [discoverList, setDiscoverList] = useState(initialDiscoverCommunities);
@@ -137,11 +219,122 @@ const Dashboard = ({ onFormSwitch }) => {
   const [auditLogs, setAuditLogs] = useState(initialAuditLogs);
   const [notifications, setNotifications] = useState(initialNotifications);
 
+  // Communities Backend Integration State
+  const [communitiesLoading, setCommunitiesLoading] = useState(false);
+  const [communitiesError, setCommunitiesError] = useState(null);
+  const [isCreatingCommunity, setIsCreatingCommunity] = useState(false);
+  const [createCommunityError, setCreateCommunityError] = useState(null);
+  const [joiningCommunityId, setJoiningCommunityId] = useState(null);
+
+  // Channels Backend Integration State
+  const [channelsLoading, setChannelsLoading] = useState(false);
+  const [channelsError, setChannelsError] = useState(null);
+  const [isCreatingChannel, setIsCreatingChannel] = useState(false);
+  const [createChannelError, setCreateChannelError] = useState(null);
+  const [isEditChannelModalOpen, setIsEditChannelModalOpen] = useState(false);
+  const [editingChannel, setEditingChannel] = useState(null);
+  const [editChannelForm, setEditChannelForm] = useState({ name: '', topic: '', type: 'text' });
+  const [isUpdatingChannel, setIsUpdatingChannel] = useState(false);
+  const [updateChannelError, setUpdateChannelError] = useState(null);
+  const [isDeleteChannelModalOpen, setIsDeleteChannelModalOpen] = useState(false);
+  const [deletingChannel, setDeletingChannel] = useState(null);
+  const [isDeletingChannel, setIsDeletingChannel] = useState(false);
+  const [deleteChannelError, setDeleteChannelError] = useState(null);
+
   // Active Contexts
   const [activeCommunity, setActiveCommunity] = useState(initialCommunities[0]);
   const [activeChannelId, setActiveChannelId] = useState(initialCommunities[0]?.channels[0]?.id || '');
   const [activeDmId, setActiveDmId] = useState(initialDirectMessages[0]?.id || '');
   const [showMembersPanel, setShowMembersPanel] = useState(true);
+
+  // Fetch Communities from Backend
+  const fetchCommunities = useCallback(async () => {
+    setCommunitiesLoading(true);
+    setCommunitiesError(null);
+    try {
+      const data = await communityService.getCommunities();
+      if (data?.success && Array.isArray(data.communities)) {
+        const currentUid = authService.getCurrentUserId() || currentUser.id;
+        const mapped = data.communities.map((c) => mapBackendCommunity(c, currentUid));
+        const joined = mapped.filter((c) => c.isJoined);
+
+        setCommunities(joined);
+        setDiscoverList(mapped);
+
+        setActiveCommunity((prev) => {
+          if (!prev || !prev._id) {
+            return joined[0] || mapped[0] || null;
+          }
+          const exists = mapped.find((c) => c.id === prev.id || c._id === prev._id);
+          return exists || prev;
+        });
+      }
+    } catch (err) {
+      console.warn('Failed to load communities from backend, retaining fallback state:', err);
+      setCommunitiesError(
+        err.friendlyMessage || err.response?.data?.message || 'Could not load communities from backend.'
+      );
+    } finally {
+      setCommunitiesLoading(false);
+    }
+  }, [currentUser.id]);
+
+  useEffect(() => {
+    let isCancelled = false;
+    Promise.resolve().then(async () => {
+      if (isCancelled) return;
+      await fetchCommunities();
+    });
+    return () => {
+      isCancelled = true;
+    };
+  }, [fetchCommunities]);
+
+  // Fetch Channels for active community from Backend
+  const fetchChannelsForCommunity = useCallback(async (communityId) => {
+    if (!communityId) return;
+    setChannelsLoading(true);
+    setChannelsError(null);
+    try {
+      const data = await channelService.getChannels(communityId);
+      if (data?.success && Array.isArray(data.channels)) {
+        const mappedChannels = data.channels.map(mapBackendChannel);
+        setActiveCommunity((prev) => (prev ? { ...prev, channels: mappedChannels } : prev));
+        setCommunities((prev) =>
+          prev.map((c) => (c.id === communityId || c._id === communityId ? { ...c, channels: mappedChannels } : c))
+        );
+        if (mappedChannels.length > 0) {
+          setActiveChannelId((prevId) => {
+            const exists = mappedChannels.some((ch) => ch.id === prevId);
+            return exists ? prevId : mappedChannels[0].id;
+          });
+        } else {
+          setActiveChannelId('');
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to load channels for community:', err);
+      setChannelsError(err.friendlyMessage || err.response?.data?.message || 'Failed to load channels');
+    } finally {
+      setChannelsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!activeCommunity) return;
+    const commId = activeCommunity._id || activeCommunity.id;
+    const isBackendComm = Boolean(activeCommunity._id || /^[0-9a-fA-F]{24}$/.test(commId));
+    if (isBackendComm && activeCommunity.isJoined) {
+      let isCancelled = false;
+      Promise.resolve().then(async () => {
+        if (isCancelled) return;
+        await fetchChannelsForCommunity(commId);
+      });
+      return () => {
+        isCancelled = true;
+      };
+    }
+  }, [activeCommunity, fetchChannelsForCommunity]);
 
   // Direct Messages Workspace State (Simplified & PDF-Compliant)
   const [dmSearchQuery, setDmSearchQuery] = useState('');
@@ -233,37 +426,83 @@ const Dashboard = ({ onFormSwitch }) => {
     setActiveCommunity(community);
     if (community.channels && community.channels.length > 0) {
       setActiveChannelId(community.channels[0].id);
+    } else {
+      setActiveChannelId('');
     }
     setActiveTab('community-view');
     setReplyingToMessage(null);
     setAttachedFile(null);
+    const commId = community._id || community.id;
+    if (community._id || /^[0-9a-fA-F]{24}$/.test(commId)) {
+      fetchChannelsForCommunity(commId);
+    }
   };
 
   // Helper: Join a discoverable community
-  const handleJoinCommunity = (communityToJoin) => {
-    const isAlreadyJoined = communities.some(c => c.id === communityToJoin.id);
+  const handleJoinCommunity = async (communityToJoin) => {
+    const commId = communityToJoin._id || communityToJoin.id;
+    const isAlreadyJoined = communities.some(
+      (c) => c.id === commId || c._id === commId || (c.isJoined && c.id === communityToJoin.id)
+    );
     if (isAlreadyJoined) {
       triggerToast(`You are already a member of ${communityToJoin.name}!`);
       return;
     }
 
-    const updatedCommunity = {
-      ...communityToJoin,
-      userRole: 'Member',
-      isJoined: true,
-      membersCount: communityToJoin.membersCount + 1,
-      channels: communityToJoin.channels || [
-        { id: `ch_${communityToJoin.id}_gen`, name: 'general', isPrivate: false, topic: 'General discussions' }
-      ],
-      members: [
-        ...(communityToJoin.members || []),
-        { id: currentUser.id, name: currentUser.name, username: currentUser.username, role: 'Member', status: 'Online', avatarText: currentUser.avatarText }
-      ]
-    };
+    const isBackend = communityToJoin._id || /^[0-9a-fA-F]{24}$/.test(commId);
+    setJoiningCommunityId(commId);
 
-    setCommunities(prev => [...prev, updatedCommunity]);
-    setDiscoverList(prev => prev.map(c => c.id === communityToJoin.id ? { ...c, isJoined: true, membersCount: c.membersCount + 1 } : c));
-    triggerToast(`🎉 Joined "${communityToJoin.name}" successfully!`);
+    if (isBackend) {
+      try {
+        const res = await communityService.joinCommunity(commId);
+        const updatedCount = res?.community?.memberCount || (communityToJoin.membersCount || 0) + 1;
+        const currentUid = authService.getCurrentUserId() || currentUser.id;
+        const updatedCommunity = {
+          ...communityToJoin,
+          userRole: 'Member',
+          isJoined: true,
+          membersCount: updatedCount,
+          members: [
+            ...(communityToJoin.members || []),
+            { id: currentUid, name: currentUser.name, username: currentUser.username, role: 'Member', status: 'Online', avatarText: currentUser.avatarText }
+          ]
+        };
+        setCommunities((prev) => [...prev.filter((c) => c.id !== commId && c._id !== commId), updatedCommunity]);
+        setDiscoverList((prev) =>
+          prev.map((c) =>
+            c.id === commId || c._id === commId ? { ...c, isJoined: true, membersCount: updatedCount } : c
+          )
+        );
+        triggerToast(`🎉 ${res?.message || `Joined "${communityToJoin.name}" successfully!`}`);
+      } catch (err) {
+        const msg = err.friendlyMessage || err.response?.data?.message || 'Failed to join community';
+        triggerToast(`⚠️ ${msg}`);
+      } finally {
+        setJoiningCommunityId(null);
+      }
+    } else {
+      // Mock fallback
+      const updatedCommunity = {
+        ...communityToJoin,
+        userRole: 'Member',
+        isJoined: true,
+        membersCount: communityToJoin.membersCount + 1,
+        channels: communityToJoin.channels || [
+          { id: `ch_${communityToJoin.id}_gen`, name: 'general', isPrivate: false, topic: 'General discussions' }
+        ],
+        members: [
+          ...(communityToJoin.members || []),
+          { id: currentUser.id, name: currentUser.name, username: currentUser.username, role: 'Member', status: 'Online', avatarText: currentUser.avatarText }
+        ]
+      };
+
+      setCommunities((prev) => [...prev, updatedCommunity]);
+      setDiscoverList((prev) =>
+        prev.map((c) => (c.id === communityToJoin.id ? { ...c, isJoined: true, membersCount: c.membersCount + 1 } : c))
+      );
+      triggerToast(`🎉 Joined "${communityToJoin.name}" successfully!`);
+      setJoiningCommunityId(null);
+    }
   };
 
   // Default channel preview helper for templates
@@ -305,97 +544,286 @@ const Dashboard = ({ onFormSwitch }) => {
   };
 
   // Helper: Create Community (Matching Server (1).png customization)
-  const handleCreateCommunitySubmit = (e) => {
+  const handleCreateCommunitySubmit = async (e) => {
     e.preventDefault();
-    if (!newCommunityForm.name.trim()) return;
+    const rawName = newCommunityForm.name.trim();
+    if (!rawName) return;
 
-    const newId = generateId('comm');
-    const defaultChannels = [
-      { id: generateId('ch'), name: 'general', isPrivate: false, topic: 'General discussions' }
-    ];
-
-    if (selectedServerTemplate === 'Gaming') {
-      defaultChannels.push(
-        { id: generateId('ch'), name: 'clips-and-highlights', isPrivate: false, topic: 'Share gameplay clips' },
-        { id: generateId('ch'), name: 'lfg-party', isPrivate: false, topic: 'Looking for group' }
-      );
-    } else if (selectedServerTemplate === 'Study Group') {
-      defaultChannels.push(
-        { id: generateId('ch'), name: 'notes-resources', isPrivate: false, topic: 'Study materials and cheatsheets' },
-        { id: generateId('ch'), name: 'homework-help', isPrivate: false, topic: 'Ask and answer study questions' }
-      );
-    } else if (selectedServerTemplate === 'School Club') {
-      defaultChannels.push(
-        { id: generateId('ch'), name: 'announcements', isPrivate: false, isAnnouncement: true, topic: 'Official club updates' },
-        { id: generateId('ch'), name: 'event-planning', isPrivate: false, topic: 'Upcoming meetups and events' }
-      );
-    } else {
-      defaultChannels.push(
-        { id: generateId('ch'), name: 'announcements', isPrivate: false, isAnnouncement: true, topic: 'Official updates' },
-        { id: generateId('ch'), name: 'lounge', isPrivate: false, topic: 'Casual hangout' }
-      );
+    if (rawName.length < 3 || rawName.length > 80) {
+      setCreateCommunityError('Community name must be between 3 and 80 characters.');
+      return;
     }
 
-    const createdCommunity = {
-      id: newId,
-      name: newCommunityForm.name.trim(),
-      slug: newCommunityForm.name.trim().toLowerCase().replace(/\s+/g, '-'),
-      icon: selectedServerAvatar,
-      iconBg: '#F0E7FF',
-      iconColor: '#B794F6',
-      category: newCommunityForm.category,
-      description: newCommunityForm.description.trim() || `${selectedServerTemplate} community created on Yappy.`,
-      membersCount: 1,
-      userRole: 'Owner',
-      isJoined: true,
-      channels: defaultChannels,
-      members: [
-        { id: currentUser.id, name: currentUser.name, username: currentUser.username, role: 'Owner', status: 'Online', avatarText: currentUser.avatarText }
-      ]
-    };
+    setIsCreatingCommunity(true);
+    setCreateCommunityError(null);
 
-    setCommunities(prev => [createdCommunity, ...prev]);
-    setIsCreateModalOpen(false);
-    setCreateServerStep(1);
-    setNewCommunityForm({ name: '', category: 'Development', description: '', isPrivate: false });
-    handleOpenCommunity(createdCommunity);
-    triggerToast(`🚀 Server "${createdCommunity.name}" created!`);
+    try {
+      const res = await communityService.createCommunity({
+        name: rawName,
+        description: newCommunityForm.description.trim() || `${selectedServerTemplate} community created on Yappy.`,
+        category: newCommunityForm.category || 'General',
+        visibility: 'public',
+      });
+
+      if (res?.success && res.community) {
+        const currentUid = authService.getCurrentUserId() || currentUser.id;
+        const mapped = mapBackendCommunity(res.community, currentUid);
+        mapped.icon = selectedServerAvatar;
+
+        // Automatically create initial default channel '#general' on backend
+        try {
+          const chanRes = await channelService.createChannel(res.community._id, {
+            name: 'general',
+            description: 'General discussions',
+            type: 'text',
+          });
+          if (chanRes?.success && chanRes.channel) {
+            mapped.channels = [mapBackendChannel(chanRes.channel)];
+          }
+        } catch (chanErr) {
+          console.warn('Could not auto-create general channel:', chanErr);
+        }
+
+        setCommunities((prev) => [mapped, ...prev]);
+        setDiscoverList((prev) => [mapped, ...prev]);
+        setIsCreateModalOpen(false);
+        setCreateServerStep(1);
+        setNewCommunityForm({ name: '', category: 'Development', description: '', isPrivate: false });
+        handleOpenCommunity(mapped);
+        triggerToast(`🚀 Server "${mapped.name}" created!`);
+      }
+    } catch (err) {
+      const msg = err.friendlyMessage || err.response?.data?.message || 'Failed to create community.';
+      setCreateCommunityError(msg);
+    } finally {
+      setIsCreatingCommunity(false);
+    }
   };
 
   // Helper: Create Text Channel in Community Workspace
-  const handleCreateChannelSubmit = (e) => {
+  const handleCreateChannelSubmit = async (e) => {
     e.preventDefault();
     const rawName = newChannelForm.name.trim();
     if (!rawName) return;
 
     const cleanChannelName = rawName.toLowerCase().replace(/[^a-z0-9-_]/g, '-');
-    const newChanId = generateId('ch');
+    if (cleanChannelName.length < 2 || cleanChannelName.length > 80) {
+      setCreateChannelError('Channel name must be between 2 and 80 characters.');
+      return;
+    }
 
-    const newChannelObj = {
-      id: newChanId,
-      name: cleanChannelName,
-      isPrivate: Boolean(newChannelForm.isPrivate),
-      topic: newChannelForm.topic.trim() || 'Welcome to the new channel!'
-    };
+    setIsCreatingChannel(true);
+    setCreateChannelError(null);
 
-    const updatedChannels = [...(activeCommunity?.channels || []), newChannelObj];
+    const commId = activeCommunity?._id || activeCommunity?.id;
+    const isBackend = activeCommunity?._id || /^[0-9a-fA-F]{24}$/.test(commId);
 
-    setActiveCommunity(prev => ({
-      ...prev,
-      channels: updatedChannels
-    }));
+    if (isBackend) {
+      try {
+        const res = await channelService.createChannel(commId, {
+          name: cleanChannelName,
+          description: newChannelForm.topic?.trim() || '',
+          type: newChannelForm.isAnnouncement ? 'announcement' : 'text',
+        });
 
-    setCommunities(prev => prev.map(c => {
-      if (c.id === activeCommunity.id) {
-        return { ...c, channels: updatedChannels };
+        if (res?.success && res.channel) {
+          const mappedChan = mapBackendChannel(res.channel);
+          const updatedChannels = [...(activeCommunity?.channels || []), mappedChan];
+
+          setActiveCommunity((prev) => ({
+            ...prev,
+            channels: updatedChannels,
+          }));
+
+          setCommunities((prev) =>
+            prev.map((c) => {
+              if (c.id === commId || c._id === commId) {
+                return { ...c, channels: updatedChannels };
+              }
+              return c;
+            })
+          );
+
+          setActiveChannelId(mappedChan.id);
+          setIsCreateChannelModalOpen(false);
+          setNewChannelForm({ name: '', topic: '', isPrivate: false, isAnnouncement: false });
+          triggerToast(`🎉 Created #${mappedChan.name} channel!`);
+        }
+      } catch (err) {
+        const msg = err.friendlyMessage || err.response?.data?.message || 'Failed to create channel.';
+        setCreateChannelError(msg);
+      } finally {
+        setIsCreatingChannel(false);
       }
-      return c;
-    }));
+    } else {
+      // Mock fallback
+      const newChanId = generateId('ch');
+      const newChannelObj = {
+        id: newChanId,
+        name: cleanChannelName,
+        isPrivate: Boolean(newChannelForm.isPrivate),
+        topic: newChannelForm.topic.trim() || 'Welcome to the new channel!',
+      };
 
-    setActiveChannelId(newChanId);
-    setIsCreateChannelModalOpen(false);
-    setNewChannelForm({ name: '', topic: '', isPrivate: false });
-    triggerToast(`Created #${cleanChannelName} channel!`);
+      const updatedChannels = [...(activeCommunity?.channels || []), newChannelObj];
+
+      setActiveCommunity((prev) => ({
+        ...prev,
+        channels: updatedChannels,
+      }));
+
+      setCommunities((prev) =>
+        prev.map((c) => {
+          if (c.id === activeCommunity.id) {
+            return { ...c, channels: updatedChannels };
+          }
+          return c;
+        })
+      );
+
+      setActiveChannelId(newChanId);
+      setIsCreateChannelModalOpen(false);
+      setNewChannelForm({ name: '', topic: '', isPrivate: false, isAnnouncement: false });
+      triggerToast(`Created #${cleanChannelName} channel!`);
+      setIsCreatingChannel(false);
+    }
+  };
+
+  // Helper: Open Edit Channel Modal
+  const handleOpenEditChannel = (channel) => {
+    setEditingChannel(channel);
+    setEditChannelForm({
+      name: channel.name,
+      topic: channel.description || channel.topic || '',
+      type: channel.type || (channel.isAnnouncement ? 'announcement' : 'text'),
+    });
+    setUpdateChannelError(null);
+    setIsEditChannelModalOpen(true);
+  };
+
+  // Helper: Submit Update Channel
+  const handleUpdateChannelSubmit = async (e) => {
+    e.preventDefault();
+    if (!editingChannel) return;
+    const cleanName = editChannelForm.name.trim().toLowerCase().replace(/[^a-z0-9-_]/g, '-');
+    if (cleanName.length < 2 || cleanName.length > 80) {
+      setUpdateChannelError('Channel name must be between 2 and 80 characters.');
+      return;
+    }
+
+    setIsUpdatingChannel(true);
+    setUpdateChannelError(null);
+
+    const channelId = editingChannel._id || editingChannel.id;
+    const isBackend = editingChannel._id || /^[0-9a-fA-F]{24}$/.test(channelId);
+
+    if (isBackend) {
+      try {
+        const res = await channelService.updateChannel(channelId, {
+          name: cleanName,
+          description: editChannelForm.topic.trim(),
+          type: editChannelForm.type,
+        });
+
+        if (res?.success && res.channel) {
+          const updated = mapBackendChannel(res.channel);
+          const updatedChannels = (activeCommunity?.channels || []).map((ch) =>
+            ch.id === channelId || ch._id === channelId ? updated : ch
+          );
+
+          setActiveCommunity((prev) => ({ ...prev, channels: updatedChannels }));
+          setCommunities((prev) =>
+            prev.map((c) =>
+              c.id === activeCommunity?.id || c._id === activeCommunity?._id ? { ...c, channels: updatedChannels } : c
+            )
+          );
+
+          setIsEditChannelModalOpen(false);
+          setEditingChannel(null);
+          triggerToast(`✅ Updated #${updated.name} successfully!`);
+        }
+      } catch (err) {
+        setUpdateChannelError(err.friendlyMessage || err.response?.data?.message || 'Failed to update channel.');
+      } finally {
+        setIsUpdatingChannel(false);
+      }
+    } else {
+      // Mock fallback
+      const updatedChannels = (activeCommunity?.channels || []).map((ch) =>
+        ch.id === channelId
+          ? { ...ch, name: cleanName, topic: editChannelForm.topic.trim(), isAnnouncement: editChannelForm.type === 'announcement' }
+          : ch
+      );
+      setActiveCommunity((prev) => ({ ...prev, channels: updatedChannels }));
+      setCommunities((prev) =>
+        prev.map((c) => (c.id === activeCommunity?.id ? { ...c, channels: updatedChannels } : c))
+      );
+      setIsEditChannelModalOpen(false);
+      setEditingChannel(null);
+      setIsUpdatingChannel(false);
+      triggerToast(`✅ Updated #${cleanName} successfully!`);
+    }
+  };
+
+  // Helper: Open Delete Channel Modal
+  const handleOpenDeleteChannel = (channel) => {
+    setDeletingChannel(channel);
+    setDeleteChannelError(null);
+    setIsDeleteChannelModalOpen(true);
+  };
+
+  // Helper: Confirm Delete Channel
+  const handleDeleteChannelConfirm = async () => {
+    if (!deletingChannel) return;
+    setIsDeletingChannel(true);
+    setDeleteChannelError(null);
+
+    const channelId = deletingChannel._id || deletingChannel.id;
+    const isBackend = deletingChannel._id || /^[0-9a-fA-F]{24}$/.test(channelId);
+
+    if (isBackend) {
+      try {
+        const res = await channelService.deleteChannel(channelId);
+        if (res?.success) {
+          const updatedChannels = (activeCommunity?.channels || []).filter(
+            (ch) => ch.id !== channelId && ch._id !== channelId
+          );
+
+          setActiveCommunity((prev) => ({ ...prev, channels: updatedChannels }));
+          setCommunities((prev) =>
+            prev.map((c) =>
+              c.id === activeCommunity?.id || c._id === activeCommunity?._id ? { ...c, channels: updatedChannels } : c
+            )
+          );
+
+          if (activeChannelId === channelId) {
+            setActiveChannelId(updatedChannels[0]?.id || '');
+          }
+
+          setIsDeleteChannelModalOpen(false);
+          setDeletingChannel(null);
+          triggerToast(`🗑️ Channel deleted successfully.`);
+        }
+      } catch (err) {
+        setDeleteChannelError(err.friendlyMessage || err.response?.data?.message || 'Failed to delete channel.');
+      } finally {
+        setIsDeletingChannel(false);
+      }
+    } else {
+      // Mock fallback
+      const updatedChannels = (activeCommunity?.channels || []).filter((ch) => ch.id !== channelId);
+      setActiveCommunity((prev) => ({ ...prev, channels: updatedChannels }));
+      setCommunities((prev) =>
+        prev.map((c) => (c.id === activeCommunity?.id ? { ...c, channels: updatedChannels } : c))
+      );
+      if (activeChannelId === channelId) {
+        setActiveChannelId(updatedChannels[0]?.id || '');
+      }
+      setIsDeleteChannelModalOpen(false);
+      setDeletingChannel(null);
+      setIsDeletingChannel(false);
+      triggerToast(`🗑️ Channel deleted successfully.`);
+    }
   };
 
 
@@ -450,7 +878,12 @@ const Dashboard = ({ onFormSwitch }) => {
     m => m.id === currentUser.id || m.username === currentUser.username
   );
   const effectiveCommunityRole = userMemberRecord?.role || activeCommunity?.userRole || 'Member';
-  const isCommunityOwner = effectiveCommunityRole === 'Owner';
+  const currentUserId = currentUser.id || authService.getCurrentUserId();
+  const isCommunityOwner = Boolean(
+    (currentUserId && activeCommunity?.owner && String(activeCommunity.owner) === String(currentUserId)) ||
+    activeCommunity?.userRole === 'Owner' ||
+    effectiveCommunityRole === 'Owner'
+  );
   const isCommunityAdmin = effectiveCommunityRole === 'Admin';
   const canManageMembers = isCommunityOwner || isCommunityAdmin || currentUser?.role === 'Community Lead';
 
@@ -1246,34 +1679,45 @@ const Dashboard = ({ onFormSwitch }) => {
                   </div>
 
                   <div className="card-grid">
-                    {communities
-                      .filter(c => !globalSearch || c.name.toLowerCase().includes(globalSearch.toLowerCase()))
-                      .slice(0, 3)
-                      .map(comm => (
-                        <div key={comm.id} className="community-card">
-                          <div
-                            className="card-icon"
-                            style={{ backgroundColor: comm.iconBg, color: comm.iconColor }}
-                          >
-                            {comm.icon}
-                          </div>
-                          <h3 className="card-title">{comm.name}</h3>
-                          <p className="card-desc">{comm.description}</p>
-                          <div className="card-footer">
-                            <span className="member-count">👥 {comm.membersCount} members</span>
-                            <div className="card-actions">
-                              <span className="badge-role">{comm.userRole}</span>
-                              <button
-                                type="button"
-                                className="btn-card-open"
-                                onClick={() => handleOpenCommunity(comm)}
-                              >
-                                Enter →
-                              </button>
+                    {communitiesLoading ? (
+                      <div className="communities-loading-state" style={{ gridColumn: '1 / -1', padding: '2rem 1rem' }}>
+                        <div className="mini-spinner"></div>
+                        <span>Loading communities...</span>
+                      </div>
+                    ) : communities.length === 0 ? (
+                      <div className="communities-empty-state" style={{ gridColumn: '1 / -1', padding: '2rem 1rem' }}>
+                        <p>No communities joined yet.</p>
+                      </div>
+                    ) : (
+                      communities
+                        .filter(c => !globalSearch || c.name.toLowerCase().includes(globalSearch.toLowerCase()))
+                        .slice(0, 3)
+                        .map(comm => (
+                          <div key={comm.id} className="community-card">
+                            <div
+                              className="card-icon"
+                              style={{ backgroundColor: comm.iconBg, color: comm.iconColor }}
+                            >
+                              {comm.icon}
+                            </div>
+                            <h3 className="card-title">{comm.name}</h3>
+                            <p className="card-desc">{comm.description}</p>
+                            <div className="card-footer">
+                              <span className="member-count">👥 {comm.membersCount} members</span>
+                              <div className="card-actions">
+                                <span className="badge-role">{comm.userRole}</span>
+                                <button
+                                  type="button"
+                                  className="btn-card-open"
+                                  onClick={() => handleOpenCommunity(comm)}
+                                >
+                                  Enter →
+                                </button>
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      ))}
+                        ))
+                    )}
                   </div>
                 </section>
 
@@ -1291,34 +1735,47 @@ const Dashboard = ({ onFormSwitch }) => {
                   </div>
 
                   <div className="card-grid">
-                    {discoverList
-                      .filter(c => !globalSearch || c.name.toLowerCase().includes(globalSearch.toLowerCase()))
-                      .slice(0, 3)
-                      .map(item => {
-                        const isJoined = communities.some(c => c.id === item.id);
-                        return (
-                          <div key={item.id} className="community-card">
-                            <div
-                              className="card-icon"
-                              style={{ backgroundColor: item.iconBg, color: item.iconColor }}
-                            >
-                              {item.icon}
-                            </div>
-                            <h3 className="card-title">{item.name}</h3>
-                            <p className="card-desc">{item.description}</p>
-                            <div className="card-footer">
-                              <span className="member-count">👥 {item.membersCount} members</span>
-                              <button
-                                type="button"
-                                className={`badge-action ${isJoined ? 'joined' : 'join'}`}
-                                onClick={() => handleJoinCommunity(item)}
+                    {communitiesLoading ? (
+                      <div className="communities-loading-state" style={{ gridColumn: '1 / -1', padding: '2rem 1rem' }}>
+                        <div className="mini-spinner"></div>
+                        <span>Loading communities...</span>
+                      </div>
+                    ) : discoverList.length === 0 ? (
+                      <div className="communities-empty-state" style={{ gridColumn: '1 / -1', padding: '2rem 1rem' }}>
+                        <p>No communities found to explore.</p>
+                      </div>
+                    ) : (
+                      discoverList
+                        .filter(c => !globalSearch || c.name.toLowerCase().includes(globalSearch.toLowerCase()))
+                        .slice(0, 3)
+                        .map(item => {
+                          const isJoined = communities.some(c => c.id === item.id || c._id === item.id || (item._id && c._id === item._id));
+                          const isJoining = joiningCommunityId === (item._id || item.id);
+                          return (
+                            <div key={item.id} className="community-card">
+                              <div
+                                className="card-icon"
+                                style={{ backgroundColor: item.iconBg, color: item.iconColor }}
                               >
-                                {isJoined ? 'Joined ✓' : 'Join'}
-                              </button>
+                                {item.icon}
+                              </div>
+                              <h3 className="card-title">{item.name}</h3>
+                              <p className="card-desc">{item.description}</p>
+                              <div className="card-footer">
+                                <span className="member-count">👥 {item.membersCount} members</span>
+                                <button
+                                  type="button"
+                                  className={`badge-action ${isJoined ? 'joined' : 'join'}`}
+                                  disabled={isJoined || isJoining}
+                                  onClick={() => handleJoinCommunity(item)}
+                                >
+                                  {isJoining ? 'Joining...' : (isJoined ? 'Joined ✓' : 'Join')}
+                                </button>
+                              </div>
                             </div>
-                          </div>
-                        );
-                      })}
+                          );
+                        })
+                    )}
                   </div>
                 </section>
               </div>
@@ -1420,43 +1877,71 @@ const Dashboard = ({ onFormSwitch }) => {
               </div>
 
               <div className="card-grid">
-                {communities
-                  .filter(c => !globalSearch || c.name.toLowerCase().includes(globalSearch.toLowerCase()))
-                  .map(comm => (
-                    <div key={comm.id} className="community-card large">
-                      <div className="card-header-row">
-                        <div
-                          className="card-icon"
-                          style={{ backgroundColor: comm.iconBg, color: comm.iconColor }}
-                        >
-                          {comm.icon}
-                        </div>
-                        <span className="badge-role">{comm.userRole}</span>
-                      </div>
-                      <h3 className="card-title">{comm.name}</h3>
-                      <p className="card-desc">{comm.description}</p>
-                      <div className="channels-pill-preview">
-                        {comm.channels?.slice(0, 3).map(ch => (
-                          <span key={ch.id} className="ch-pill">
-                            {ch.isPrivate ? '🔒' : '#'}{ch.name}
-                          </span>
-                        ))}
-                        {comm.channels?.length > 3 && (
-                          <span className="ch-pill more">+{comm.channels.length - 3} more</span>
-                        )}
-                      </div>
-                      <div className="card-footer">
-                        <span className="member-count">👥 {comm.membersCount} members</span>
-                        <button
-                          type="button"
-                          className="btn-card-open"
-                          onClick={() => handleOpenCommunity(comm)}
-                        >
-                          Enter Community →
-                        </button>
-                      </div>
+                {communitiesLoading ? (
+                  <div className="communities-loading-state" style={{ gridColumn: '1 / -1' }}>
+                    <div className="spinner-large"></div>
+                    <p>Loading communities from server...</p>
+                  </div>
+                ) : communitiesError && communities.length === 0 ? (
+                  <div className="communities-error-state" style={{ gridColumn: '1 / -1' }}>
+                    <p>⚠️ {communitiesError}</p>
+                    <button type="button" className="btn-retry-action" onClick={fetchCommunities}>
+                      Retry Loading
+                    </button>
+                  </div>
+                ) : communities.length === 0 ? (
+                  <div className="communities-empty-state" style={{ gridColumn: '1 / -1' }}>
+                    <div className="empty-icon">🌐</div>
+                    <h3>No communities joined yet</h3>
+                    <p>Explore interest hubs in Discover Communities or create your own space!</p>
+                    <div className="empty-actions">
+                      <button type="button" className="btn-primary-purple" onClick={() => setIsCreateModalOpen(true)}>
+                        + Create Community
+                      </button>
+                      <button type="button" className="btn-secondary-outline" onClick={() => setActiveTab('discover')}>
+                        Explore Discover
+                      </button>
                     </div>
-                  ))}
+                  </div>
+                ) : (
+                  communities
+                    .filter(c => !globalSearch || c.name.toLowerCase().includes(globalSearch.toLowerCase()))
+                    .map(comm => (
+                      <div key={comm.id} className="community-card large">
+                        <div className="card-header-row">
+                          <div
+                            className="card-icon"
+                            style={{ backgroundColor: comm.iconBg, color: comm.iconColor }}
+                          >
+                            {comm.icon}
+                          </div>
+                          <span className="badge-role">{comm.userRole}</span>
+                        </div>
+                        <h3 className="card-title">{comm.name}</h3>
+                        <p className="card-desc">{comm.description}</p>
+                        <div className="channels-pill-preview">
+                          {comm.channels?.slice(0, 3).map(ch => (
+                            <span key={ch.id} className="ch-pill">
+                              {ch.isPrivate ? '🔒' : '#'}{ch.name}
+                            </span>
+                          ))}
+                          {comm.channels?.length > 3 && (
+                            <span className="ch-pill more">+{comm.channels.length - 3} more</span>
+                          )}
+                        </div>
+                        <div className="card-footer">
+                          <span className="member-count">👥 {comm.membersCount} members</span>
+                          <button
+                            type="button"
+                            className="btn-card-open"
+                            onClick={() => handleOpenCommunity(comm)}
+                          >
+                            Enter Community →
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                )}
               </div>
             </div>
           )}
@@ -1484,37 +1969,59 @@ const Dashboard = ({ onFormSwitch }) => {
               </div>
 
               <div className="card-grid">
-                {discoverList
-                  .filter(item => discoverCategory === 'All' || item.category === discoverCategory)
-                  .filter(item => !globalSearch || item.name.toLowerCase().includes(globalSearch.toLowerCase()) || item.description.toLowerCase().includes(globalSearch.toLowerCase()))
-                  .map(item => {
-                    const isJoined = communities.some(c => c.id === item.id);
-                    return (
-                      <div key={item.id} className="community-card large">
-                        <div className="card-header-row">
-                          <div
-                            className="card-icon"
-                            style={{ backgroundColor: item.iconBg, color: item.iconColor }}
-                          >
-                            {item.icon}
+                {communitiesLoading ? (
+                  <div className="communities-loading-state" style={{ gridColumn: '1 / -1' }}>
+                    <div className="spinner-large"></div>
+                    <p>Discovering available communities...</p>
+                  </div>
+                ) : communitiesError && discoverList.length === 0 ? (
+                  <div className="communities-error-state" style={{ gridColumn: '1 / -1' }}>
+                    <p>⚠️ {communitiesError}</p>
+                    <button type="button" className="btn-retry-action" onClick={fetchCommunities}>
+                      Retry Loading
+                    </button>
+                  </div>
+                ) : discoverList.filter(item => discoverCategory === 'All' || item.category === discoverCategory).length === 0 ? (
+                  <div className="communities-empty-state" style={{ gridColumn: '1 / -1' }}>
+                    <div className="empty-icon">🔍</div>
+                    <h3>No communities found</h3>
+                    <p>No communities match the current filter. Try selecting "All" or create a new community!</p>
+                  </div>
+                ) : (
+                  discoverList
+                    .filter(item => discoverCategory === 'All' || item.category === discoverCategory)
+                    .filter(item => !globalSearch || item.name.toLowerCase().includes(globalSearch.toLowerCase()) || item.description.toLowerCase().includes(globalSearch.toLowerCase()))
+                    .map(item => {
+                      const isJoined = communities.some(c => c.id === item.id || c._id === item.id || (item._id && c._id === item._id));
+                      const isJoining = joiningCommunityId === (item._id || item.id);
+                      return (
+                        <div key={item.id} className="community-card large">
+                          <div className="card-header-row">
+                            <div
+                              className="card-icon"
+                              style={{ backgroundColor: item.iconBg, color: item.iconColor }}
+                            >
+                              {item.icon}
+                            </div>
+                            <span className="cat-badge">{item.category}</span>
                           </div>
-                          <span className="cat-badge">{item.category}</span>
+                          <h3 className="card-title">{item.name}</h3>
+                          <p className="card-desc">{item.description}</p>
+                          <div className="card-footer">
+                            <span className="member-count">👥 {item.membersCount} members</span>
+                            <button
+                              type="button"
+                              className={`badge-action ${isJoined ? 'joined' : 'join'}`}
+                              disabled={isJoined || isJoining}
+                              onClick={() => handleJoinCommunity(item)}
+                            >
+                              {isJoining ? 'Joining...' : (isJoined ? 'Joined ✓' : 'Join Community')}
+                            </button>
+                          </div>
                         </div>
-                        <h3 className="card-title">{item.name}</h3>
-                        <p className="card-desc">{item.description}</p>
-                        <div className="card-footer">
-                          <span className="member-count">👥 {item.membersCount} members</span>
-                          <button
-                            type="button"
-                            className={`badge-action ${isJoined ? 'joined' : 'join'}`}
-                            onClick={() => handleJoinCommunity(item)}
-                          >
-                            {isJoined ? 'Joined ✓' : 'Join Community'}
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    })
+                )}
               </div>
             </div>
           )}
@@ -1548,7 +2055,10 @@ const Dashboard = ({ onFormSwitch }) => {
                       <button
                         type="button"
                         className="btn-add-channel-icon"
-                        onClick={() => setIsCreateChannelModalOpen(true)}
+                        onClick={() => {
+                          setCreateChannelError(null);
+                          setIsCreateChannelModalOpen(true);
+                        }}
                         title="Create Channel"
                         aria-label="Create Channel"
                       >
@@ -1556,20 +2066,92 @@ const Dashboard = ({ onFormSwitch }) => {
                       </button>
                     )}
                   </div>
-                  {activeCommunity.channels?.map(channel => (
-                    <button
+
+                  {channelsLoading && (
+                    <div className="channels-loading-state">
+                      <div className="mini-spinner"></div>
+                      <span>Loading channels...</span>
+                    </div>
+                  )}
+
+                  {channelsError && !channelsLoading && (
+                    <div className="channels-error-state">
+                      <span>{channelsError}</span>
+                      <button
+                        type="button"
+                        className="btn-retry-channels"
+                        onClick={() => {
+                          const commId = activeCommunity._id || activeCommunity.id;
+                          fetchChannelsForCommunity(commId);
+                        }}
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  )}
+
+                  {!channelsLoading && (!activeCommunity.channels || activeCommunity.channels.length === 0) && (
+                    <div className="channels-empty-state">
+                      <p>No channels in this community yet.</p>
+                      {isCommunityOwner && (
+                        <button
+                          type="button"
+                          className="btn-create-first-chan"
+                          onClick={() => {
+                            setCreateChannelError(null);
+                            setIsCreateChannelModalOpen(true);
+                          }}
+                        >
+                          + Create Channel
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {!channelsLoading && activeCommunity.channels?.map(channel => (
+                    <div
                       key={channel.id}
-                      type="button"
-                      className={`channel-item ${activeChannelId === channel.id ? 'active' : ''}`}
-                      onClick={() => {
-                        setActiveChannelId(channel.id);
-                        setReplyingToMessage(null);
-                      }}
+                      className={`channel-item-row ${activeChannelId === channel.id ? 'active' : ''}`}
                     >
-                      <span className="channel-hash">{channel.isPrivate ? '🔒' : '#'}</span>
-                      <span className="channel-name">{channel.name}</span>
-                      {channel.isAnnouncement && <span className="announcement-tag">📢</span>}
-                    </button>
+                      <button
+                        type="button"
+                        className={`channel-item ${activeChannelId === channel.id ? 'active' : ''}`}
+                        onClick={() => {
+                          setActiveChannelId(channel.id);
+                          setReplyingToMessage(null);
+                        }}
+                      >
+                        <span className="channel-hash">{channel.isPrivate ? '🔒' : '#'}</span>
+                        <span className="channel-name">{channel.name}</span>
+                        {channel.isAnnouncement && <span className="announcement-tag">📢</span>}
+                      </button>
+                      {isCommunityOwner && (
+                        <div className="channel-item-actions">
+                          <button
+                            type="button"
+                            className="btn-chan-action"
+                            title="Edit Channel"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenEditChannel(channel);
+                            }}
+                          >
+                            ✏️
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-chan-action delete"
+                            title="Delete Channel"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenDeleteChannel(channel);
+                            }}
+                          >
+                            🗑️
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   ))}
                 </div>
 
@@ -2955,6 +3537,11 @@ const Dashboard = ({ onFormSwitch }) => {
                 </p>
 
                 {/* Footer Action Buttons */}
+                {createCommunityError && (
+                  <div className="modal-error-banner" style={{ margin: '0.75rem 0' }}>
+                    ⚠️ {createCommunityError}
+                  </div>
+                )}
                 <div className="server-step2-actions">
                   <button
                     type="button"
@@ -2974,9 +3561,9 @@ const Dashboard = ({ onFormSwitch }) => {
                     <button
                       type="submit"
                       className="btn-server-create-green"
-                      disabled={!newCommunityForm.name.trim()}
+                      disabled={!newCommunityForm.name.trim() || isCreatingCommunity}
                     >
-                      Create
+                      {isCreatingCommunity ? 'Creating...' : 'Create'}
                     </button>
                   </div>
                 </div>
@@ -2995,6 +3582,11 @@ const Dashboard = ({ onFormSwitch }) => {
               <button type="button" onClick={() => setIsCreateChannelModalOpen(false)}>×</button>
             </div>
             <form onSubmit={handleCreateChannelSubmit}>
+              {createChannelError && (
+                <div className="modal-error-banner">
+                  ⚠️ {createChannelError}
+                </div>
+              )}
               <div className="modal-form-group">
                 <label>Channel Name</label>
                 <input
@@ -3015,24 +3607,139 @@ const Dashboard = ({ onFormSwitch }) => {
                 />
               </div>
               <div className="modal-form-group">
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={newChannelForm.isPrivate}
-                    onChange={(e) => setNewChannelForm({ ...newChannelForm, isPrivate: e.target.checked })}
-                  />
-                  <span>Private Channel (🔒 Only members with permission can view)</span>
-                </label>
+                <label>Channel Type</label>
+                <select
+                  value={newChannelForm.isAnnouncement ? 'announcement' : 'text'}
+                  onChange={(e) =>
+                    setNewChannelForm({
+                      ...newChannelForm,
+                      isAnnouncement: e.target.value === 'announcement',
+                    })
+                  }
+                  style={{
+                    width: '100%',
+                    padding: '0.6rem 0.8rem',
+                    borderRadius: '8px',
+                    border: '1px solid var(--color-soft-border)',
+                    background: 'var(--color-warm-cream)',
+                    fontFamily: 'inherit',
+                  }}
+                >
+                  <option value="text">💬 Text Channel</option>
+                  <option value="announcement">📢 Announcement Channel</option>
+                </select>
               </div>
               <div className="modal-actions">
                 <button type="button" className="btn-modal-cancel" onClick={() => setIsCreateChannelModalOpen(false)}>
                   Cancel
                 </button>
-                <button type="submit" className="btn-modal-submit" disabled={!newChannelForm.name.trim()}>
-                  Create Channel
+                <button type="submit" className="btn-modal-submit" disabled={!newChannelForm.name.trim() || isCreatingChannel}>
+                  {isCreatingChannel ? 'Creating...' : 'Create Channel'}
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* EDIT CHANNEL MODAL */}
+      {isEditChannelModalOpen && (
+        <div className="modal-backdrop" onClick={() => setIsEditChannelModalOpen(false)}>
+          <div className="dashboard-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Edit #{editingChannel?.name}</h3>
+              <button type="button" onClick={() => setIsEditChannelModalOpen(false)}>×</button>
+            </div>
+            <form onSubmit={handleUpdateChannelSubmit}>
+              {updateChannelError && (
+                <div className="modal-error-banner">
+                  ⚠️ {updateChannelError}
+                </div>
+              )}
+              <div className="modal-form-group">
+                <label>Channel Name</label>
+                <input
+                  type="text"
+                  placeholder="e.g. project-discussions"
+                  required
+                  value={editChannelForm.name}
+                  onChange={(e) => setEditChannelForm({ ...editChannelForm, name: e.target.value })}
+                />
+              </div>
+              <div className="modal-form-group">
+                <label>Topic / Description</label>
+                <input
+                  type="text"
+                  placeholder="What is this channel about?"
+                  value={editChannelForm.topic}
+                  onChange={(e) => setEditChannelForm({ ...editChannelForm, topic: e.target.value })}
+                />
+              </div>
+              <div className="modal-form-group">
+                <label>Channel Type</label>
+                <select
+                  value={editChannelForm.type}
+                  onChange={(e) => setEditChannelForm({ ...editChannelForm, type: e.target.value })}
+                  style={{
+                    width: '100%',
+                    padding: '0.6rem 0.8rem',
+                    borderRadius: '8px',
+                    border: '1px solid var(--color-soft-border)',
+                    background: 'var(--color-warm-cream)',
+                    fontFamily: 'inherit',
+                  }}
+                >
+                  <option value="text">💬 Text Channel</option>
+                  <option value="announcement">📢 Announcement Channel</option>
+                </select>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="btn-modal-cancel" onClick={() => setIsEditChannelModalOpen(false)}>
+                  Cancel
+                </button>
+                <button type="submit" className="btn-modal-submit" disabled={!editChannelForm.name.trim() || isUpdatingChannel}>
+                  {isUpdatingChannel ? 'Saving...' : 'Save Changes'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* DELETE CHANNEL MODAL */}
+      {isDeleteChannelModalOpen && (
+        <div className="modal-backdrop" onClick={() => setIsDeleteChannelModalOpen(false)}>
+          <div className="dashboard-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 style={{ color: '#E53E3E' }}>Delete Channel #{deletingChannel?.name}</h3>
+              <button type="button" onClick={() => setIsDeleteChannelModalOpen(false)}>×</button>
+            </div>
+            <div style={{ padding: '1rem 0' }}>
+              {deleteChannelError && (
+                <div className="modal-error-banner">
+                  ⚠️ {deleteChannelError}
+                </div>
+              )}
+              <p style={{ fontSize: '0.9rem', color: 'var(--color-ink-black)', marginBottom: '0.5rem' }}>
+                Are you sure you want to delete <strong>#{deletingChannel?.name}</strong>?
+              </p>
+              <p style={{ fontSize: '0.8rem', color: 'var(--color-muted-grey)' }}>
+                This action is permanent and cannot be undone. All messages in this channel will be removed.
+              </p>
+            </div>
+            <div className="modal-actions">
+              <button type="button" className="btn-modal-cancel" onClick={() => setIsDeleteChannelModalOpen(false)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-modal-delete"
+                onClick={handleDeleteChannelConfirm}
+                disabled={isDeletingChannel}
+              >
+                {isDeletingChannel ? 'Deleting...' : 'Delete Channel'}
+              </button>
+            </div>
           </div>
         </div>
       )}
