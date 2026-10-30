@@ -70,8 +70,14 @@ const AVATAR_PRESETS = [
 
 // Helper: Map backend community response to dashboard structure
 const mapBackendCommunity = (comm, currentUserId) => {
-  const isOwner = Boolean(currentUserId && String(comm.owner) === String(currentUserId));
-  const isMember = Boolean(comm.isMember || isOwner);
+  const ownerId = comm.owner?._id || comm.owner?.id || comm.owner;
+  const isOwner = Boolean(currentUserId && String(ownerId) === String(currentUserId));
+  const isMember = Boolean(
+    comm.isMember ||
+    isOwner ||
+    (Array.isArray(comm.members) &&
+      comm.members.some((m) => String(m?._id || m?.id || m?.user?._id || m?.user || m) === String(currentUserId)))
+  );
 
   const category = comm.category || 'General';
   let icon = '👥';
@@ -105,16 +111,16 @@ const mapBackendCommunity = (comm, currentUserId) => {
   }
 
   return {
-    id: comm._id,
-    _id: comm._id,
+    id: comm._id || comm.id,
+    _id: comm._id || comm.id,
     name: comm.name,
-    slug: comm.name.toLowerCase().replace(/\s+/g, '-'),
+    slug: comm.slug || (comm.name ? comm.name.toLowerCase().replace(/\s+/g, '-') : 'community'),
     icon: comm.icon || icon,
     iconBg: comm.iconBg || iconBg,
     iconColor: comm.iconColor || iconColor,
     category,
     description: comm.description || '',
-    membersCount: comm.memberCount || 1,
+    membersCount: comm.memberCount || comm.membersCount || (Array.isArray(comm.members) ? comm.members.length : 1),
     userRole: isOwner ? 'Owner' : (isMember ? 'Member' : 'Viewer'),
     isJoined: isMember,
     owner: comm.owner,
@@ -211,8 +217,9 @@ const Dashboard = ({ onFormSwitch }) => {
       id: tokenUid || initialCurrentUser.id,
     };
   });
-  const [communities, setCommunities] = useState(initialCommunities);
-  const [discoverList, setDiscoverList] = useState(initialDiscoverCommunities);
+  const isAuthed = authService.isAuthenticated();
+  const [communities, setCommunities] = useState(() => (isAuthed ? [] : initialCommunities));
+  const [discoverList, setDiscoverList] = useState(() => (isAuthed ? [] : initialDiscoverCommunities));
   const [channelMessages, setChannelMessages] = useState(initialChannelMessages);
   const [directMessages, setDirectMessages] = useState(initialDirectMessages);
   const [moderationItems, setModerationItems] = useState(initialModerationItems);
@@ -220,7 +227,7 @@ const Dashboard = ({ onFormSwitch }) => {
   const [notifications, setNotifications] = useState(initialNotifications);
 
   // Communities Backend Integration State
-  const [communitiesLoading, setCommunitiesLoading] = useState(false);
+  const [communitiesLoading, setCommunitiesLoading] = useState(() => isAuthed);
   const [communitiesError, setCommunitiesError] = useState(null);
   const [isCreatingCommunity, setIsCreatingCommunity] = useState(false);
   const [createCommunityError, setCreateCommunityError] = useState(null);
@@ -242,13 +249,19 @@ const Dashboard = ({ onFormSwitch }) => {
   const [deleteChannelError, setDeleteChannelError] = useState(null);
 
   // Active Contexts
-  const [activeCommunity, setActiveCommunity] = useState(initialCommunities[0]);
-  const [activeChannelId, setActiveChannelId] = useState(initialCommunities[0]?.channels[0]?.id || '');
+  const [activeCommunity, setActiveCommunity] = useState(() => (isAuthed ? null : initialCommunities[0]));
+  const [activeChannelId, setActiveChannelId] = useState(() => (isAuthed ? '' : (initialCommunities[0]?.channels[0]?.id || '')));
   const [activeDmId, setActiveDmId] = useState(initialDirectMessages[0]?.id || '');
   const [showMembersPanel, setShowMembersPanel] = useState(true);
 
   // Fetch Communities from Backend
   const fetchCommunities = useCallback(async () => {
+    if (!authService.isAuthenticated()) {
+      setCommunitiesLoading(false);
+      setCommunitiesError('Please log in to view your communities.');
+      return;
+    }
+
     setCommunitiesLoading(true);
     setCommunitiesError(null);
     try {
@@ -268,12 +281,20 @@ const Dashboard = ({ onFormSwitch }) => {
           const exists = mapped.find((c) => c.id === prev.id || c._id === prev._id);
           return exists || prev;
         });
+      } else {
+        setCommunities([]);
+        setDiscoverList([]);
       }
     } catch (err) {
-      console.warn('Failed to load communities from backend, retaining fallback state:', err);
-      setCommunitiesError(
-        err.friendlyMessage || err.response?.data?.message || 'Could not load communities from backend.'
-      );
+      console.warn('Failed to load communities from backend:', err);
+      if (err.response?.status === 401) {
+        authService.clearSession();
+        setCommunitiesError('Session expired or unauthorized. Please log in again.');
+      } else {
+        setCommunitiesError(
+          err.friendlyMessage || err.response?.data?.message || 'Could not load communities from backend.'
+        );
+      }
     } finally {
       setCommunitiesLoading(false);
     }
@@ -1917,6 +1938,29 @@ const Dashboard = ({ onFormSwitch }) => {
                         <div className="mini-spinner"></div>
                         <span>Loading communities...</span>
                       </div>
+                    ) : communitiesError && communities.length === 0 ? (
+                      <div className="communities-error-state" style={{ gridColumn: '1 / -1', padding: '1.5rem 1rem' }}>
+                        <p style={{ margin: 0, fontSize: '0.9rem' }}>⚠️ {communitiesError}</p>
+                        {communitiesError.toLowerCase().includes('log in') || communitiesError.toLowerCase().includes('unauthorized') || communitiesError.toLowerCase().includes('session') ? (
+                          <button
+                            type="button"
+                            className="btn-retry-action"
+                            style={{ marginTop: '0.75rem' }}
+                            onClick={() => (onFormSwitch ? onFormSwitch('login') : (window.location.hash = 'login'))}
+                          >
+                            Go to Login →
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn-retry-action"
+                            style={{ marginTop: '0.75rem' }}
+                            onClick={fetchCommunities}
+                          >
+                            Retry Loading
+                          </button>
+                        )}
+                      </div>
                     ) : communities.length === 0 ? (
                       <div className="communities-empty-state" style={{ gridColumn: '1 / -1', padding: '2rem 1rem' }}>
                         <p>No communities joined yet.</p>
@@ -2118,9 +2162,19 @@ const Dashboard = ({ onFormSwitch }) => {
                 ) : communitiesError && communities.length === 0 ? (
                   <div className="communities-error-state" style={{ gridColumn: '1 / -1' }}>
                     <p>⚠️ {communitiesError}</p>
-                    <button type="button" className="btn-retry-action" onClick={fetchCommunities}>
-                      Retry Loading
-                    </button>
+                    {communitiesError.toLowerCase().includes('log in') || communitiesError.toLowerCase().includes('unauthorized') || communitiesError.toLowerCase().includes('session') ? (
+                      <button
+                        type="button"
+                        className="btn-retry-action"
+                        onClick={() => (onFormSwitch ? onFormSwitch('login') : (window.location.hash = 'login'))}
+                      >
+                        Go to Login →
+                      </button>
+                    ) : (
+                      <button type="button" className="btn-retry-action" onClick={fetchCommunities}>
+                        Retry Loading
+                      </button>
+                    )}
                   </div>
                 ) : communities.length === 0 ? (
                   <div className="communities-empty-state" style={{ gridColumn: '1 / -1' }}>
@@ -2210,9 +2264,19 @@ const Dashboard = ({ onFormSwitch }) => {
                 ) : communitiesError && discoverList.length === 0 ? (
                   <div className="communities-error-state" style={{ gridColumn: '1 / -1' }}>
                     <p>⚠️ {communitiesError}</p>
-                    <button type="button" className="btn-retry-action" onClick={fetchCommunities}>
-                      Retry Loading
-                    </button>
+                    {communitiesError.toLowerCase().includes('log in') || communitiesError.toLowerCase().includes('unauthorized') || communitiesError.toLowerCase().includes('session') ? (
+                      <button
+                        type="button"
+                        className="btn-retry-action"
+                        onClick={() => (onFormSwitch ? onFormSwitch('login') : (window.location.hash = 'login'))}
+                      >
+                        Go to Login →
+                      </button>
+                    ) : (
+                      <button type="button" className="btn-retry-action" onClick={fetchCommunities}>
+                        Retry Loading
+                      </button>
+                    )}
                   </div>
                 ) : discoverList.filter(item => discoverCategory === 'All' || item.category === discoverCategory).length === 0 ? (
                   <div className="communities-empty-state" style={{ gridColumn: '1 / -1' }}>

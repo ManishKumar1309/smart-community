@@ -213,11 +213,15 @@ const ForgotPasswordPage = (props) => {
               <div style={{ textAlign: 'center', marginTop: '1rem' }}>
                 <button
                   type="button"
-                  style={{ background: 'none', border: 'none', color: '#8A2BE2', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 500 }}
+                  style={{ background: 'none', border: 'none', color: '#6434df', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 700 }}
                   onClick={() => {
-                    setMode('reset');
-                    setStatusMessage(null);
-                    setErrors({});
+                    if (props.onFormSwitch) {
+                      props.onFormSwitch('resetPassword');
+                    } else {
+                      setMode('reset');
+                      setStatusMessage(null);
+                      setErrors({});
+                    }
                   }}
                 >
                   Have a reset token? Enter it here &rarr;
